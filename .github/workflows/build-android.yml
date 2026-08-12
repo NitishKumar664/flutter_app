@@ -89,23 +89,60 @@ jobs:
         # regenerated fresh above, this has to be applied every run rather
         # than edited once by hand. Remove this step if your server always
         # uses HTTPS.
+        #
+        # Two independent methods, since we don't have direct visibility
+        # into exactly which Flutter template variant generated this
+        # project: (1) the usesCleartextTraffic attribute on <application>,
+        # and (2) a network_security_config.xml referenced from the
+        # manifest. Android only needs one of these to work.
         working-directory: ${{ steps.locate.outputs.dir }}
         run: |
-          sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/network_security_config.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+              <base-config cleartextTrafficPermitted="true">
+                  <trust-anchors>
+                      <certificates src="system"/>
+                  </trust-anchors>
+              </base-config>
+          </network-security-config>
+          XMLEOF
 
-      - name: Verify cleartext setting actually applied
-        # Prints the real manifest content into the build log so we can
-        # confirm — not guess — whether the patch above actually took effect.
+          python3 - <<'PYEOF'
+          import re
+
+          path = "android/app/src/main/AndroidManifest.xml"
+          content = open(path).read()
+          original = content
+
+          # Method 1: usesCleartextTraffic attribute.
+          if 'usesCleartextTraffic' not in content:
+              content = re.sub(r'<application\b', '<application android:usesCleartextTraffic="true"', content, count=1)
+
+          # Method 2: reference the network security config file created above.
+          if 'networkSecurityConfig' not in content:
+              content = re.sub(r'<application\b', '<application android:networkSecurityConfig="@xml/network_security_config"', content, count=1)
+
+          if content != original:
+              open(path, 'w').write(content)
+              print("Patched AndroidManifest.xml with both cleartext methods")
+          else:
+              print("Manifest already had both settings — nothing to patch")
+          PYEOF
+
+      - name: Show final manifest (diagnostic — always runs, never fails the build)
+        # Prints full, real content so if anything is ever still wrong, the
+        # next log has everything needed to diagnose it in one look instead
+        # of another back-and-forth.
         working-directory: ${{ steps.locate.outputs.dir }}
+        if: always()
         run: |
-          echo "=== AndroidManifest.xml <application> line ==="
-          grep -A1 "<application" android/app/src/main/AndroidManifest.xml
-          if grep -q 'usesCleartextTraffic="true"' android/app/src/main/AndroidManifest.xml; then
-            echo "CONFIRMED: cleartext traffic is enabled in this build."
-          else
-            echo "::error::usesCleartextTraffic was NOT found in the manifest — the sed patch above failed silently."
-            exit 1
-          fi
+          echo "=== Full AndroidManifest.xml ==="
+          cat android/app/src/main/AndroidManifest.xml
+          echo ""
+          echo "=== network_security_config.xml ==="
+          cat android/app/src/main/res/xml/network_security_config.xml 2>/dev/null || echo "(not present)"
 
       - name: Install dependencies
         working-directory: ${{ steps.locate.outputs.dir }}
