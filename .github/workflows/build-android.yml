@@ -1,0 +1,108 @@
+name: Build Android APK
+
+# Builds a downloadable APK using GitHub's own runners — you don't need
+# Flutter/Android SDK installed anywhere yourself. Runs on every push to
+# main, and can also be triggered manually from the Actions tab.
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Locate the Flutter project
+        # Works whether pubspec.yaml sits at the repo root OR inside a
+        # flutter_app/ subfolder — no more depending on exactly how files
+        # were uploaded.
+        id: locate
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            echo "Found pubspec.yaml at repo root"
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f "flutter_app/pubspec.yaml" ]; then
+            echo "Found pubspec.yaml inside flutter_app/"
+            echo "dir=flutter_app" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not find pubspec.yaml at repo root or in flutter_app/. Check where your files actually landed on GitHub."
+            exit 1
+          fi
+
+      - name: Generate Android platform scaffolding (if not already present)
+        # `flutter create` on a directory that already has a pubspec.yaml only
+        # fills in whatever's missing (the android/ folder) — it does NOT
+        # overwrite your existing lib/ or pubspec.yaml. Deliberately left at
+        # Flutter's default SDK 34 target — SDK 35 triggered a persistent
+        # AAPT2 resource-linking crash on this runner across several
+        # different fixes, so pubspec.yaml now pins file_picker below the
+        # version that pulled in a transitive SDK-35 requirement instead.
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android --org com.filedrop --project-name file_drop_app .
+          fi
+
+      - name: Bump Kotlin Gradle plugin version
+        # Flutter's default template pins an older Kotlin version than some
+        # recent plugins (e.g. file_picker 8.x) require. Patches whichever
+        # file actually declares it — newer Flutter templates use
+        # settings.gradle, older ones use build.gradle — without needing to
+        # know in advance which one this project has. Uses Python instead of
+        # sed to avoid backreference/digit-adjacency quoting pitfalls.
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          python3 - <<'PYEOF'
+          import re, os
+
+          patches = [
+              ("android/settings.gradle",
+               r'(org\.jetbrains\.kotlin\.android"\s+version\s+")[^"]+(")',
+               r'\g<1>2.0.20\g<2>'),
+              ("android/build.gradle",
+               r"ext\.kotlin_version\s*=\s*'[^']+'",
+               "ext.kotlin_version = '2.0.20'"),
+          ]
+          for path, pattern, repl in patches:
+              if not os.path.exists(path):
+                  continue
+              content = open(path).read()
+              new_content = re.sub(pattern, repl, content)
+              if new_content != content:
+                  open(path, 'w').write(new_content)
+                  print(f"Patched Kotlin version in {path}")
+              else:
+                  print(f"No Kotlin version pattern matched in {path} (may already be current, or uses a different declaration style)")
+          PYEOF
+
+      - name: Allow plain HTTP (cleartext) connections
+        # Since android/ isn't committed to git (see .gitignore) and gets
+        # regenerated fresh above, this has to be applied every run rather
+        # than edited once by hand. Remove this step if your server always
+        # uses HTTPS.
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
+
+      - name: Install dependencies
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-drop-app-apk
+          path: ${{ steps.locate.outputs.dir }}/build/app/outputs/flutter-apk/app-release.apk
