@@ -93,6 +93,20 @@ jobs:
         run: |
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
 
+      - name: Verify cleartext setting actually applied
+        # Prints the real manifest content into the build log so we can
+        # confirm — not guess — whether the patch above actually took effect.
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: |
+          echo "=== AndroidManifest.xml <application> line ==="
+          grep -A1 "<application" android/app/src/main/AndroidManifest.xml
+          if grep -q 'usesCleartextTraffic="true"' android/app/src/main/AndroidManifest.xml; then
+            echo "CONFIRMED: cleartext traffic is enabled in this build."
+          else
+            echo "::error::usesCleartextTraffic was NOT found in the manifest — the sed patch above failed silently."
+            exit 1
+          fi
+
       - name: Install dependencies
         working-directory: ${{ steps.locate.outputs.dir }}
         run: flutter pub get
